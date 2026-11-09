@@ -54,7 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bin/build-zip.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mcp-api-keys
           path: dist/mcp-api-keys.zip
