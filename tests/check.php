@@ -77,4 +77,9 @@ foreach ( array( '', '/', '/mcp-keys', '/mcp-keys/mcpx', '/mcp-keys/mcp-x', '/ot
 	ok( ! mcpk_is_our_route( $route ), 'not our route: ' . json_encode( $route ) );
 }
 
+// --- Same answer on every platform: no inet_pton quirks (leading zeros, zone ids) ---
+ok( ! mcpk_rule_valid( '010.0.0.1' ), 'leading-zero IPv4 is not an IP' );
+ok( ! mcpk_rule_valid( 'fe80::1%en0' ), 'zone id is not an IP' );
+ok( ! mcpk_ip_allowed( '010.0.0.1', array( '10.0.0.1' ) ), 'leading-zero address is denied' );
+
 echo "OK\n";

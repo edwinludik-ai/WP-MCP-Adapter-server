@@ -1,12 +1,15 @@
 <?php
 /**
  * Plugin Name:       MCP API Keys
+ * Plugin URI:        https://github.com/edwinludik-ai/WP-MCP-Adapter-server
  * Description:       A WordPress MCP Adapter server protected by hashed API keys, each with an optional IPv4/IPv6 allowlist.
  * Version:           1.0.0
  * Requires at least: 6.9
  * Requires PHP:      7.4
  * Requires Plugins:  mcp-adapter
+ * Author:            Edwin Ludik
  * License:           GPL-2.0-or-later
+ * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain:       mcp-api-keys
  */
 
@@ -21,7 +24,11 @@ defined( 'ABSPATH' ) || exit;
  * Returns null if $ip is not an IP address.
  */
 function mcpk_ip_to_bin( string $ip ): ?string {
-	$bin = @inet_pton( $ip );
+	// filter_var is strict and behaves the same everywhere; inet_pton alone accepts leading zeros and zone ids on some platforms.
+	if ( false === filter_var( $ip, FILTER_VALIDATE_IP ) ) {
+		return null;
+	}
+	$bin = inet_pton( $ip );
 	if ( false === $bin ) {
 		return null;
 	}
@@ -109,7 +116,8 @@ function mcpk_parse_rules( string $text ): array {
 
 /** New key: 'mcpk_<8 hex id>_<43-char base64url secret>'. Returns [ 'id' => ..., 'key' => ... ]. */
 function mcpk_generate_key(): array {
-	$id     = bin2hex( random_bytes( 4 ) );
+	$id = bin2hex( random_bytes( 4 ) );
+	// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode -- encodes random bytes into a URL-safe secret; not obfuscation.
 	$secret = rtrim( strtr( base64_encode( random_bytes( 32 ) ), '+/', '-_' ), '=' );
 	return array(
 		'id'  => $id,
@@ -226,6 +234,7 @@ function mcpk_authenticate( $result ) {
 		'invalid' => array( 'mcpk_invalid', 'Invalid API key.', 401 ),
 		'ip'      => array( 'mcpk_ip', 'IP address not allowed.', 403 ),
 	);
+
 	$keys = (array) get_option( MCPK_OPTION, array() );
 	$rec  = mcpk_verify( $keys, mcpk_extract_key( $_SERVER ), $_SERVER['REMOTE_ADDR'] ?? null, wp_salt( 'auth' ) );
 	$user = is_array( $rec ) ? get_userdata( (int) $rec['user_id'] ) : false;
@@ -375,7 +384,20 @@ function mcpk_render_page(): void {
 			<?php wp_nonce_field( 'mcpk_create' ); ?>
 			<table class="form-table" role="presentation">
 				<tr><th><label for="mcpk-label">Label</label></th><td><input id="mcpk-label" name="label" type="text" class="regular-text" required></td></tr>
-				<tr><th><label for="mcpk-user">Acts as user</label></th><td><?php wp_dropdown_users( array( 'name' => 'user_id', 'id' => 'mcpk-user' ) ); ?><p class="description">Use the lowest role that can do the job.</p></td></tr>
+				<tr>
+					<th><label for="mcpk-user">Acts as user</label></th>
+					<td>
+						<?php
+						wp_dropdown_users(
+							array(
+								'name' => 'user_id',
+								'id'   => 'mcpk-user',
+							)
+						);
+						?>
+						<p class="description">Use the lowest role that can do the job.</p>
+					</td>
+				</tr>
 				<tr><th><label for="mcpk-ips">Allowed IPs</label></th><td><textarea id="mcpk-ips" name="ips" rows="4" class="large-text code" placeholder="203.0.113.7&#10;198.51.100.0/24&#10;2001:db8::/32"></textarea><p class="description">One per line (or comma-separated): IPv4 or IPv6, optional /prefix. Leave empty to allow any IP. Matched against the connection's address, not forwarded headers.</p></td></tr>
 			</table>
 			<?php submit_button( 'Create key' ); ?>
@@ -384,34 +406,39 @@ function mcpk_render_page(): void {
 	<?php
 }
 
+/** Ends an admin-post request with a message page and a link back to the keys screen. $html must already be escaped. */
+function mcpk_die( string $html, string $title, int $status ): void {
+	wp_die(
+		$html, // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- every caller passes escaped HTML.
+		esc_html( $title ),
+		array(
+			'response'  => absint( $status ),
+			'link_url'  => esc_url( admin_url( 'options-general.php?page=mcp-api-keys' ) ),
+			'link_text' => esc_html__( 'Back to API keys', 'mcp-api-keys' ),
+		)
+	);
+}
+
 function mcpk_handle_create(): void {
 	if ( ! current_user_can( 'manage_options' ) ) {
 		wp_die( 'Forbidden', '', array( 'response' => 403 ) );
 	}
 	check_admin_referer( 'mcpk_create' );
-	$back    = array(
-		'link_url'  => admin_url( 'options-general.php?page=mcp-api-keys' ),
-		'link_text' => 'Back to API keys',
-	);
 	$label   = sanitize_text_field( wp_unslash( $_POST['label'] ?? '' ) );
 	$user_id = absint( $_POST['user_id'] ?? 0 );
 	$ips     = mcpk_parse_rules( sanitize_textarea_field( wp_unslash( $_POST['ips'] ?? '' ) ) );
 	// The dropdown only lists this site's users, but the POST body can name anyone: on multisite that would
 	// let a site admin mint a key that acts as a super admin.
 	if ( '' === $label || ! get_userdata( $user_id ) || ! current_user_can( 'edit_user', $user_id ) || ! is_user_member_of_blog( $user_id ) ) {
-		wp_die( 'A label and a user you can manage on this site are required.', 'Invalid input', array( 'response' => 400 ) + $back );
+		mcpk_die( 'A label and a user you can manage on this site are required.', 'Invalid input', 400 );
 	}
 	if ( $ips['invalid'] ) {
-		wp_die( 'Invalid IP rule(s): ' . esc_html( implode( ', ', $ips['invalid'] ) ), 'Invalid input', array( 'response' => 400 ) + $back );
+		mcpk_die( 'Invalid IP rule(s): ' . esc_html( implode( ', ', $ips['invalid'] ) ), 'Invalid input', 400 );
 	}
 	$key = mcpk_create_key( $label, $user_id, $ips['rules'] );
 	nocache_headers();
 	// Shown once, in this response only: the key is never stored or redirected.
-	wp_die(
-		'<p>Copy this key now. It cannot be shown again.</p><p><code>' . esc_html( $key ) . '</code></p>',
-		'API key created',
-		array( 'response' => 200 ) + $back
-	);
+	mcpk_die( '<p>Copy this key now. It cannot be shown again.</p><p><code>' . esc_html( $key ) . '</code></p>', 'API key created', 200 );
 }
 add_action( 'admin_post_mcpk_create', 'mcpk_handle_create' );
 

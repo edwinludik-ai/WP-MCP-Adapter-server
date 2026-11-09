@@ -29,9 +29,27 @@ jobs:
       - name: Unit checks (key hashing, header parsing, IP/CIDR matching)
         run: php tests/check.php
 
+  standards:
+    name: WordPress coding standards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer
+      - name: Install PHPCS with the WordPress and PHP-compatibility rulesets
+        run: |
+          composer global config allow-plugins.dealerdirect/phpcodesniffer-composer-installer true
+          composer global require --no-interaction wp-coding-standards/wpcs:^3 phpcompatibility/phpcompatibility-wp dealerdirect/phpcodesniffer-composer-installer
+          composer global config bin-dir --absolute --quiet >> "$GITHUB_PATH"
+      - name: PHPCS (rules in .phpcs.xml.dist)
+        run: phpcs
+
   build:
     name: Build plugin zip
-    needs: test
+    needs: [test, standards]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -98,3 +116,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/mcp-api-keys.zip --title "$GITHUB_REF_NAME" --generate-notes
+
+  wporg:
+    name: Deploy to WordPress.org
+    # Off until the plugin is approved on WordPress.org. Then add the repository secrets SVN_USERNAME and
+    # SVN_PASSWORD and the repository variable WPORG_DEPLOY=true (Settings > Secrets and variables > Actions).
+    if: startsWith(github.ref, 'refs/tags/v') && vars.WPORG_DEPLOY == 'true'
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcp-api-keys
+          path: dist
+      - name: Unpack the released zip
+        run: unzip -q dist/mcp-api-keys.zip -d pkg
+      - name: readme.txt must name a real WordPress.org contributor
+        run: "! grep -q REPLACE_WITH_WPORG_USERNAME pkg/mcp-api-keys/readme.txt"
+      - name: Commit to the WordPress.org SVN repository (trunk and a tag)
+        uses: 10up/action-wordpress-plugin-deploy@2.3.0
+        env:
+          SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
+          SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
+          SLUG: mcp-api-keys
+          BUILD_DIR: pkg/mcp-api-keys
