@@ -13,6 +13,10 @@ The adapter's default server (`/wp-json/mcp/mcp-adapter-default-server`) is unto
 
 WordPress 6.9+, PHP 7.4+, and the [MCP Adapter plugin](https://github.com/WordPress/mcp-adapter/releases/latest) active.
 
+## Install
+
+Download `mcp-api-keys.zip` from the [latest release](../../releases/latest) and upload it under **Plugins > Add New Plugin > Upload Plugin** (or `wp plugin install mcp-api-keys.zip --activate`). Install and activate the MCP Adapter first; this plugin declares it as a required plugin. Deleting the plugin from wp-admin also deletes the stored key hashes.
+
 ## Use
 
 1. Install and activate this plugin (and MCP Adapter).
@@ -49,10 +53,28 @@ Web chat connectors (claude.ai, ChatGPT) sign in with OAuth and cannot use API k
 
 ```bash
 php tests/check.php        # key hashing, header parsing, IP/CIDR matching (no WordPress needed)
+bin/build-zip.sh           # builds dist/mcp-api-keys.zip, the installable plugin
 ```
 
-End-to-end check against a real WordPress (Playground, with the adapter preinstalled by the blueprint):
+End-to-end check against a real WordPress (Playground, with the adapter preinstalled by the blueprint). In one terminal:
 
 ```bash
 npx @wp-playground/cli@latest server --blueprint=tests/blueprint.json --auto-mount --login --port=9400
 ```
+
+and in another, once it prints `Ready!`:
+
+```bash
+python3 tests/smoke.py
+```
+
+### CI and releases
+
+`.github/workflows/ci.yml` runs on pushes to `main`, pull requests and tags:
+
+1. **test:** lint plus `tests/check.php` on PHP 7.4, 8.1, 8.3 and 8.4.
+2. **build:** `bin/build-zip.sh`, uploading `mcp-api-keys.zip` as a workflow artifact.
+3. **smoke:** unpacks that zip into a real WordPress with the MCP Adapter and runs `tests/smoke.py` against it, so the packaged files are what gets tested.
+4. **release:** on a `v*` tag, after the above pass, creates a GitHub release with the zip attached. The tag must match the plugin header's `Version:` (tag `v1.0.1` needs `Version: 1.0.1`).
+
+To cut a release: bump `Version:` in `mcp-api-keys.php`, merge, then `git tag v1.0.1 && git push origin v1.0.1`.

@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.4', '8.1', '8.3', '8.4'] # 7.4 is the plugin's minimum
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+      - name: Lint
+        run: find . -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Unit checks (key hashing, header parsing, IP/CIDR matching)
+        run: php tests/check.php
+
+  build:
+    name: Build plugin zip
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bin/build-zip.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcp-api-keys
+          path: dist/mcp-api-keys.zip
+          if-no-files-found: error
+
+  smoke:
+    name: Smoke test the zip on WordPress
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcp-api-keys
+          path: dist
+      - name: Unpack the built zip
+        run: unzip -q dist/mcp-api-keys.zip -d pkg
+      - name: Start WordPress (Playground) with the unpacked plugin and the MCP Adapter
+        run: |
+          nohup npx -y @wp-playground/cli@3.1.62 server \
+            --blueprint=tests/blueprint.json --auto-mount="$PWD/pkg/mcp-api-keys" --login --port=9400 \
+            > playground.log 2>&1 &
+          for _ in $(seq 1 100); do
+            grep -q 'Ready!' playground.log && exit 0
+            sleep 3
+          done
+          cat playground.log
+          exit 1
+      - name: Smoke test
+        run: python3 tests/smoke.py
+      - name: Playground log
+        if: failure()
+        run: cat playground.log
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcp-api-keys
+          path: dist
+      - name: Tag must match the plugin header version
+        run: |
+          version=$(sed -n 's/^ \* Version: *//p' mcp-api-keys.php | head -n1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match the plugin's Version: $version"
+            exit 1
+          fi
+      - name: Create the GitHub release with the zip attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/mcp-api-keys.zip --title "$GITHUB_REF_NAME" --generate-notes
