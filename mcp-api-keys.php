@@ -167,12 +167,41 @@ function mcpk_verify( array $keys, ?string $presented, ?string $ip, string $salt
 	return $rec;
 }
 
+/** The key records minus those bound to $user_id (ids are kept). */
+function mcpk_keys_without_user( array $keys, int $user_id ): array {
+	return array_filter(
+		$keys,
+		function ( $rec ) use ( $user_id ) {
+			return (int) ( $rec['user_id'] ?? 0 ) !== $user_id;
+		}
+	);
+}
+
 /* ---------------------------------------------------------------------------
  * WordPress layer: storage, authentication, ability, server
  * ------------------------------------------------------------------------- */
 
-const MCPK_OPTION = 'mcp_keys_keys';
-const MCPK_ROUTE  = '/mcp-keys/mcp';
+const MCPK_OPTION      = 'mcp_keys_keys';
+const MCPK_SEEN_OPTION = 'mcp_keys_last_used'; // Key id => last-used time, kept apart from the key records.
+const MCPK_ROUTE       = '/mcp-keys/mcp';
+
+/** Writes the key records and drops last-used entries of keys that no longer exist. */
+function mcpk_save_keys( array $keys ): void {
+	update_option( MCPK_OPTION, $keys, false );
+	update_option( MCPK_SEEN_OPTION, array_intersect_key( (array) get_option( MCPK_SEEN_OPTION, array() ), $keys ), false );
+}
+
+/**
+ * Keys are bearer secrets, so refuse them (and their creation) over plain HTTP, as core does for Application
+ * Passwords. Local environments are exempt. A site behind a TLS-terminating proxy that WordPress cannot see
+ * through can switch the check off with the 'mcp_keys_require_https' filter.
+ */
+function mcpk_https_ok(): bool {
+	if ( is_ssl() || 'local' === wp_get_environment_type() ) {
+		return true;
+	}
+	return ! apply_filters( 'mcp_keys_require_https', true );
+}
 
 /** Stores a new key (hash only) and returns the plaintext key. It cannot be retrieved again. */
 function mcpk_create_key( string $label, int $user_id, array $ips ): string {
@@ -181,22 +210,28 @@ function mcpk_create_key( string $label, int $user_id, array $ips ): string {
 		$k = mcpk_generate_key();
 	} while ( isset( $keys[ $k['id'] ] ) );
 	$keys[ $k['id'] ] = array(
-		'label'     => $label,
-		'user_id'   => $user_id,
-		'hash'      => mcpk_hash( $k['key'], wp_salt( 'auth' ) ),
-		'ips'       => array_values( $ips ),
-		'created'   => time(),
-		'last_used' => 0,
+		'label'   => $label,
+		'user_id' => $user_id,
+		'hash'    => mcpk_hash( $k['key'], wp_salt( 'auth' ) ),
+		'ips'     => array_values( $ips ),
+		'created' => time(),
 	);
-	update_option( MCPK_OPTION, $keys, false );
+	mcpk_save_keys( $keys );
 	return $k['key'];
 }
 
 function mcpk_revoke_key( string $id ): void {
 	$keys = (array) get_option( MCPK_OPTION, array() );
 	unset( $keys[ $id ] );
-	update_option( MCPK_OPTION, $keys, false );
+	mcpk_save_keys( $keys );
 }
+
+/** A user's keys go with the user, so a later account that reuses the ID can never inherit them. */
+function mcpk_revoke_user_keys( $user_id ): void {
+	mcpk_save_keys( mcpk_keys_without_user( (array) get_option( MCPK_OPTION, array() ), (int) $user_id ) );
+}
+add_action( 'deleted_user', 'mcpk_revoke_user_keys' );
+add_action( 'remove_user_from_blog', 'mcpk_revoke_user_keys' );
 
 /**
  * True if a REST route belongs to our server. Mirrors how core matches routes (case-insensitive, and `$`
@@ -229,17 +264,25 @@ function mcpk_authenticate( $result ) {
 	if ( ! mcpk_is_our_route( (string) ( $GLOBALS['wp']->query_vars['rest_route'] ?? '' ) ) ) {
 		return $result;
 	}
+	// An earlier filter (a firewall, say) already refused this request: that answer stands.
+	if ( is_wp_error( $result ) ) {
+		return $result;
+	}
 	$errors = array(
 		'missing' => array( 'mcpk_missing', 'API key required.', 401 ),
 		'invalid' => array( 'mcpk_invalid', 'Invalid API key.', 401 ),
 		'ip'      => array( 'mcpk_ip', 'IP address not allowed.', 403 ),
+		'https'   => array( 'mcpk_https', 'HTTPS is required for API keys.', 403 ),
 	);
 
-	$keys = (array) get_option( MCPK_OPTION, array() );
-	$rec  = mcpk_verify( $keys, mcpk_extract_key( $_SERVER ), $_SERVER['REMOTE_ADDR'] ?? null, wp_salt( 'auth' ) );
+	$rec = 'https';
+	if ( mcpk_https_ok() ) {
+		$rec = mcpk_verify( (array) get_option( MCPK_OPTION, array() ), mcpk_extract_key( $_SERVER ), $_SERVER['REMOTE_ADDR'] ?? null, wp_salt( 'auth' ) );
+	}
 	$user = is_array( $rec ) ? get_userdata( (int) $rec['user_id'] ) : false;
-	if ( is_array( $rec ) && ! $user ) {
-		$rec = 'invalid'; // The key's user was deleted.
+	// The key's user was deleted or, on multisite, is no longer a member of this site.
+	if ( is_array( $rec ) && ( ! $user || ( is_multisite() && ! is_user_member_of_blog( $user->ID ) ) ) ) {
+		$rec = 'invalid';
 	}
 	if ( ! is_array( $rec ) ) {
 		list( $code, $message, $status ) = $errors[ $rec ];
@@ -247,11 +290,14 @@ function mcpk_authenticate( $result ) {
 	}
 	wp_set_current_user( $user->ID );
 	mcpk_authed( true );
-	// ponytail: unlocked read-modify-write of one option; concurrent requests can drop a last-used update. Per-key rows/table if that matters.
-	if ( time() - (int) $rec['last_used'] > HOUR_IN_SECONDS ) {
-		$keys[ $rec['id'] ]['last_used'] = time();
-		update_option( MCPK_OPTION, $keys, false );
+	// Last use is stored apart from the key records, so this write can never overwrite (and so undo) a revoke.
+	// ponytail: unlocked read-modify-write of the last-used map; concurrent requests can drop an update. Fine for a hint.
+	$seen = (array) get_option( MCPK_SEEN_OPTION, array() );
+	if ( time() - (int) ( $seen[ $rec['id'] ] ?? 0 ) > HOUR_IN_SECONDS ) {
+		$seen[ $rec['id'] ] = time();
+		update_option( MCPK_SEEN_OPTION, $seen, false );
 	}
+	// true, not null: core's cookie check would otherwise drop this user when the request also carries a login cookie.
 	return true;
 }
 add_filter( 'rest_authentication_errors', 'mcpk_authenticate', 5 );
@@ -339,11 +385,15 @@ function mcpk_render_page(): void {
 		return;
 	}
 	$keys   = (array) get_option( MCPK_OPTION, array() );
+	$seen   = (array) get_option( MCPK_SEEN_OPTION, array() );
 	$action = esc_url( admin_url( 'admin-post.php' ) );
 	$format = get_option( 'date_format' ) . ' ' . get_option( 'time_format' );
 	?>
 	<div class="wrap">
 		<h1>MCP API Keys</h1>
+		<?php if ( ! mcpk_https_ok() ) : ?>
+			<div class="notice notice-error"><p><strong>This site is not served over HTTPS.</strong> API keys are refused over plain HTTP because anyone on the network could read them. Enable HTTPS to use them.</p></div>
+		<?php endif; ?>
 		<p>Endpoint: <code><?php echo esc_html( rest_url( 'mcp-keys/mcp' ) ); ?></code><br>
 		Send a key as <code>Authorization: Bearer &lt;key&gt;</code> or <code>X-API-Key: &lt;key&gt;</code>. Requests act as the key's user.</p>
 
@@ -357,6 +407,7 @@ function mcpk_render_page(): void {
 				<?php
 				$id   = (string) $id; // All-digit hex ids come back as int array keys.
 				$user = get_userdata( (int) $k['user_id'] );
+				$last = (int) ( $seen[ $id ] ?? 0 );
 				?>
 				<tr>
 					<td><?php echo esc_html( $k['label'] ); ?></td>
@@ -364,7 +415,7 @@ function mcpk_render_page(): void {
 					<td><?php echo $user ? esc_html( $user->user_login ) : '<em>deleted user</em>'; ?></td>
 					<td><?php echo $k['ips'] ? esc_html( implode( ', ', $k['ips'] ) ) : 'any'; ?></td>
 					<td><?php echo esc_html( wp_date( $format, (int) $k['created'] ) ); ?></td>
-					<td><?php echo $k['last_used'] ? esc_html( wp_date( $format, (int) $k['last_used'] ) ) : 'never'; ?></td>
+					<td><?php echo $last ? esc_html( wp_date( $format, $last ) ) : 'never'; ?></td>
 					<td>
 						<form method="post" action="<?php echo $action; // phpcs:ignore WordPress.Security.EscapeOutput -- escaped above. ?>">
 							<input type="hidden" name="action" value="mcpk_revoke">
@@ -424,6 +475,9 @@ function mcpk_handle_create(): void {
 		wp_die( 'Forbidden', '', array( 'response' => 403 ) );
 	}
 	check_admin_referer( 'mcpk_create' );
+	if ( ! mcpk_https_ok() ) {
+		mcpk_die( 'API keys can only be created over HTTPS: the key would cross the network in clear text.', 'HTTPS required', 403 );
+	}
 	$label   = sanitize_text_field( wp_unslash( $_POST['label'] ?? '' ) );
 	$user_id = absint( $_POST['user_id'] ?? 0 );
 	$ips     = mcpk_parse_rules( sanitize_textarea_field( wp_unslash( $_POST['ips'] ?? '' ) ) );

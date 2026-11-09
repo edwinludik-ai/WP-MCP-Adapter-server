@@ -1,0 +1,7 @@
+version: 2
+updates:
+  # Keeps the GitHub Actions in .github/workflows current, including the commit-pinned deploy action.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

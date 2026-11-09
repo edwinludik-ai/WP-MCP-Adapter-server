@@ -12,6 +12,7 @@ import base64
 import http.cookiejar
 import json
 import re
+import secrets
 import sys
 import time
 import urllib.error
@@ -34,12 +35,21 @@ def admin_get(url):
     return admin.open(url, timeout=60).read().decode()
 
 
-def admin_post(data):
+def admin_post(data, headers=None):
+    req = urllib.request.Request(BASE + "/wp-admin/admin-post.php", urllib.parse.urlencode(data).encode(), headers or {})
     try:
-        r = admin.open(BASE + "/wp-admin/admin-post.php", urllib.parse.urlencode(data).encode(), timeout=60)
+        r = admin.open(req, timeout=60)
         return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
+
+
+def admin_rest(method, path, body=None):
+    """A REST call as the logged-in administrator (cookie + nonce)."""
+    nonce = admin_get(BASE + "/wp-admin/admin-ajax.php?action=rest-nonce")
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(BASE + path, data, {"Content-Type": "application/json", "X-WP-Nonce": nonce}, method=method)
+    return json.loads(admin.open(req, timeout=60).read().decode())
 
 
 def wait_for_admin():
@@ -54,10 +64,10 @@ def wait_for_admin():
     sys.exit("could not load the admin screen as an administrator")
 
 
-def create_key(label, ips=""):
+def create_key(label, ips="", user_id=1, headers=None):
     html = admin_get(PAGE)
     nonce = re.findall(r'name="_wpnonce" value="([a-z0-9]+)"', html)[-1]  # the create form comes after the revoke forms
-    status, body = admin_post({"action": "mcpk_create", "_wpnonce": nonce, "label": label, "user_id": 1, "ips": ips})
+    status, body = admin_post({"action": "mcpk_create", "_wpnonce": nonce, "label": label, "user_id": user_id, "ips": ips}, headers)
     m = re.search(KEY_RE, body)
     return status, (m.group(0) if m else None)
 
@@ -174,6 +184,38 @@ def main():
     check("key limited to 203.0.113.0/24", s, 403, "mcpk_ip" in b)
     s, b, _ = call(ROUTE, INIT, bearer(local_key))
     check("key limited to loopback addresses", s, 200, "serverInfo" in b)
+
+    # hardening: keys need HTTPS (the blueprint's test hook turns the requirement on per request with a header)
+    s, b, _ = call(ROUTE, INIT, {**bearer(any_key), "X-Smoke-Require-Https": "1"})
+    check("key refused over plain HTTP when HTTPS is required", s, 403, "mcpk_https" in b)
+    s, refused = create_key("over http", headers={"X-Smoke-Require-Https": "1"})
+    check("key creation refused over plain HTTP when HTTPS is required", s, 403, refused is None)
+
+    # hardening: an error from an earlier REST auth filter (a firewall, say) is not overridden by a valid key
+    s, b, _ = call(ROUTE, INIT, {**bearer(any_key), "X-Smoke-Block": "1"})
+    check("earlier filter's refusal is honoured despite a valid key", s, 403, "smoke_block" in b)
+
+    # hardening: key-authenticated responses must not be cached
+    s, _, h = call(ROUTE, INIT, bearer(any_key))
+    check("key-authenticated response is not cacheable", s, 200, "no-store" in (h.get("Cache-Control") or ""))
+
+    # last-used time is shown (it is stored apart from the key records)
+    key_id_any = re.match(r"mcpk_([0-9a-f]{8})_", any_key).group(1)
+    row = re.search(r"<tr>(?:(?!</tr>).)*mcpk_%s_…(?:(?!</tr>).)*</tr>" % key_id_any, admin_get(PAGE), re.S)
+    cells = [re.sub(r"<[^>]+>", "", c).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", row.group(0), re.S)] if row else []
+    check("last-used time is listed after a key is used", 200, 200, len(cells) > 5 and cells[5] != "never")
+
+    # hardening: deleting a user revokes their keys
+    user = admin_rest("POST", "/wp-json/wp/v2/users", {"username": "smoke_user", "email": "smoke_user@example.com", "password": secrets.token_urlsafe(18), "roles": ["subscriber"]})
+    s, user_key = create_key("subscriber key", user_id=user["id"])
+    check("create a key for a subscriber", s, 200, user_key is not None)
+    s, b, _ = call(ROUTE, INIT, bearer(user_key))
+    check("subscriber's key works", s, 200, "serverInfo" in b)
+    admin_rest("DELETE", f"/wp-json/wp/v2/users/{user['id']}?force=true&reassign=1")
+    s, _, _ = call(ROUTE, INIT, bearer(user_key))
+    check("deleted user's key is rejected", s, 401)
+    user_key_id = re.match(r"mcpk_([0-9a-f]{8})_", user_key).group(1)
+    check("deleted user's key is removed from the list", 200, 200, "mcpk_%s_" % user_key_id not in admin_get(PAGE))
 
     # revoke
     key_id = re.match(r"mcpk_([0-9a-f]{8})_", any_key).group(1)

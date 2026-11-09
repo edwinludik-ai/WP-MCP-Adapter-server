@@ -8,7 +8,7 @@
 		{
 			"step": "writeFile",
 			"path": "/wordpress/wp-content/mu-plugins/enable-app-passwords.php",
-			"data": "<?php add_filter( 'wp_is_application_passwords_available', '__return_true' );"
+			"data": "<?php\nadd_filter( 'wp_is_application_passwords_available', '__return_true' );\n// Test hooks, switched per request by headers so tests/smoke.py can exercise both outcomes.\nadd_filter( 'mcp_keys_require_https', function ( $require ) { return isset( $_SERVER['HTTP_X_SMOKE_REQUIRE_HTTPS'] ) ? $require : false; } );\nadd_filter( 'rest_authentication_errors', function ( $result ) { return isset( $_SERVER['HTTP_X_SMOKE_BLOCK'] ) ? new WP_Error( 'smoke_block', 'Blocked by an earlier filter.', array( 'status' => 403 ) ) : $result; }, 1 );\n"
 		},
 		{
 			"step": "installPlugin",

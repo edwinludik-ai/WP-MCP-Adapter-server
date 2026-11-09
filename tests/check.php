@@ -82,4 +82,14 @@ ok( ! mcpk_rule_valid( '010.0.0.1' ), 'leading-zero IPv4 is not an IP' );
 ok( ! mcpk_rule_valid( 'fe80::1%en0' ), 'zone id is not an IP' );
 ok( ! mcpk_ip_allowed( '010.0.0.1', array( '10.0.0.1' ) ), 'leading-zero address is denied' );
 
+// --- A user's keys go with the user ---
+$owned = array(
+	'a1a1a1a1' => array( 'user_id' => 1 ),
+	'b2b2b2b2' => array( 'user_id' => 2 ),
+	'c3c3c3c3' => array( 'user_id' => '2' ),
+	'd4d4d4d4' => array(),
+);
+ok( array_keys( mcpk_keys_without_user( $owned, 2 ) ) === array( 'a1a1a1a1', 'd4d4d4d4' ), 'keys of user 2 removed (int and string ids), others kept with their ids' );
+ok( mcpk_keys_without_user( $owned, 99 ) === $owned, 'no keys for that user: nothing removed' );
+
 echo "OK\n";

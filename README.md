@@ -45,7 +45,10 @@ The address checked is the connection's `REMOTE_ADDR`; `X-Forwarded-For` and sim
 | no key (including cookie or Application Password auth) | 401 |
 | unknown id or wrong secret | 401 |
 | valid key, IP not allowed | 403 |
-| key's user deleted | 401 |
+| key's user deleted or removed from the site | the user's keys are revoked (401) |
+| plain HTTP on a non-local site | 403 `mcpk_https`; keys cannot be created either |
+
+Keys are secrets in a request header, so they are only accepted (and created) over HTTPS, as WordPress does for Application Passwords. Local environments are exempt. If your site is behind a proxy that terminates HTTPS and WordPress cannot see it, return `false` from the `mcp_keys_require_https` filter. If another plugin's `rest_authentication_errors` filter (for example a firewall) runs before this one and refuses a request, that refusal stands.
 
 Web chat connectors (claude.ai, ChatGPT) sign in with OAuth and cannot use API keys; use a desktop or CLI client.
 
@@ -85,7 +88,11 @@ To cut a release: bump `Version:` in `mcp-api-keys.php` **and** `Stable tag:` in
 
 1. **Fill in `readme.txt`:** replace `REPLACE_WITH_WPORG_USERNAME` after `Contributors:` with your WordPress.org username (the `wporg` job refuses to run while it is still there).
 2. **Submit the first version by hand:** sign in at [wordpress.org/plugins/developers/add](https://wordpress.org/plugins/developers/add/) and upload `mcp-api-keys.zip` from the GitHub release. The plugin review team reads it, usually within days to a couple of weeks, and emails you. Fix anything they raise and reply.
-3. **After approval** you get an SVN repository at `plugins.svn.wordpress.org/mcp-api-keys`. In this GitHub repo, under Settings > Secrets and variables > Actions, add the secrets `SVN_USERNAME` and `SVN_PASSWORD` (your WordPress.org login, or an SVN password if you set one) and the variable `WPORG_DEPLOY` = `true`.
+3. **After approval** you get an SVN repository at `plugins.svn.wordpress.org/mcp-api-keys`. Whoever can push a `v*` tag can trigger a deploy, so lock it down in this GitHub repo:
+   - Settings > Environments > New environment `wordpress-org`, with a required reviewer. Add the secrets `SVN_USERNAME` and `SVN_PASSWORD` (your WordPress.org login, or an SVN password if you set one) to that environment, not to the repository. Each deploy then waits for approval before the secrets are released.
+   - Settings > Secrets and variables > Actions > Variables: add `WPORG_DEPLOY` = `true`.
+   - Settings > Rules: protect the `v*` tags so only maintainers can create them, and require passing CI on `main`.
+   - Turn on two-factor authentication on your WordPress.org account.
 4. **Release** by pushing a `v*` tag as above. The `wporg` job commits the same files the smoke test ran to `trunk` and tags that version. WordPress.org shows whatever `Stable tag:` in `readme.txt` names.
 
 Banner and icon images are optional; if you add them, put them in `.wordpress-org/` and pass `ASSETS_DIR` to the deploy step.

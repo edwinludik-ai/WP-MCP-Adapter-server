@@ -56,6 +56,14 @@ In one option, `mcp_keys_keys`, as hashes only. Deleting the plugin removes it.
 
 Keys are hashed with your site's `auth` salt, so changing the salts invalidates all of them. Create new keys.
 
+= A key gets "HTTPS is required". =
+
+API keys travel in a request header, so the plugin refuses them (and refuses to create them) over plain HTTP, as WordPress does for Application Passwords. Serve your site over HTTPS. Local development sites are exempt. If your site is behind a proxy that terminates HTTPS and WordPress cannot tell, return `false` from the `mcp_keys_require_https` filter.
+
+= What happens to a user's keys when the user is deleted? =
+
+They are revoked automatically, and the same happens when a user is removed from a site on multisite.
+
 = A key got a 403. =
 
 The key has an IP allowlist and the request came from an address that is not on it. A 401 means the key is missing, wrong or revoked.

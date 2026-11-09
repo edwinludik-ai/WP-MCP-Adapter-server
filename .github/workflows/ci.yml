@@ -119,11 +119,13 @@ jobs:
 
   wporg:
     name: Deploy to WordPress.org
-    # Off until the plugin is approved on WordPress.org. Then add the repository secrets SVN_USERNAME and
-    # SVN_PASSWORD and the repository variable WPORG_DEPLOY=true (Settings > Secrets and variables > Actions).
+    # Off until the plugin is approved on WordPress.org. Then create the environment "wordpress-org" with a required
+    # reviewer, put the secrets SVN_USERNAME and SVN_PASSWORD in it, and set the repository variable WPORG_DEPLOY=true
+    # (Settings > Environments, and Settings > Secrets and variables > Actions > Variables).
     if: startsWith(github.ref, 'refs/tags/v') && vars.WPORG_DEPLOY == 'true'
     needs: release
     runs-on: ubuntu-latest
+    environment: wordpress-org # the reviewer approves each deploy before the secrets are released
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -134,7 +136,7 @@ jobs:
       - name: readme.txt must name a real WordPress.org contributor
         run: "! grep -q REPLACE_WITH_WPORG_USERNAME pkg/mcp-api-keys/readme.txt"
       - name: Commit to the WordPress.org SVN repository (trunk and a tag)
-        uses: 10up/action-wordpress-plugin-deploy@2.3.0
+        uses: 10up/action-wordpress-plugin-deploy@54bd289b8525fd23a5c365ec369185f2966529c2 # 2.3.0 (pinned to the commit; Dependabot bumps it)
         env:
           SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
           SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
